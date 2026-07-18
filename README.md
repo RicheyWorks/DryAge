@@ -25,10 +25,36 @@ coordinates are generations, not timestamps, and views run on scratch copies so 
 never touched. Record-granularity as-of (a bounded-recovery stop condition upstream) is the
 named next seam.
 
+## Design notes
+
+- **The vault is history: append and release, never mutate.** Generations land by atomic
+  move; `asOf` views run on scratch copies (recovery may touch its directory — history may
+  not be touched), deleted when the view closes. A second visit reads identically.
+- **Preserve is the shutter.** No hidden auto-snapshots — the caller's cadence is the
+  timeline, and `release` makes aging out old history an explicit policy decision.
+- **The past is a full store.** An `AgedView` is a real SmokeHouse: ranges, gets, order
+  statistics, even Carver over it. Reading history costs nothing in new machinery.
+- **Named next seam:** record-granularity as-of needs a bounded-recovery stop condition
+  upstream — to be cut with a consumer and evidence, not simulated here with a hack.
+
 ## The ecosystem
 
-Engines 1–6: [CSRBT](https://github.com/RicheyWorks/CSRBT) (index) · [SuperBeefSort](https://github.com/RicheyWorks/SuperBeefSort) (intake) · [SmokeHouse](https://github.com/RicheyWorks/SmokeHouse) (store) · [Carver](https://github.com/RicheyWorks/Carver) (read planner) · [Renderer](https://github.com/RicheyWorks/Renderer) (materialized views) · [Brine](https://github.com/RicheyWorks/Brine) (adaptive cache).
-Engines 7–11: [PitBoss](https://github.com/RicheyWorks/PitBoss) (fleet conductor) · [DryAge](https://github.com/RicheyWorks/DryAge) (time travel) · [Twine](https://github.com/RicheyWorks/Twine) (atomic batches) · [SmokeSignal](https://github.com/RicheyWorks/SmokeSignal) (the wire) · [Jerky](https://github.com/RicheyWorks/Jerky) (cold archives).
+Eleven engines, one organism — each in its own repo, composed by nested Gradle
+composite builds:
+
+| Engine | Role |
+|---|---|
+| [CSRBT](https://github.com/RicheyWorks/CSRBT) | the adaptive ordered index — orders the world |
+| [SuperBeefSort](https://github.com/RicheyWorks/SuperBeefSort) | the intake tract — profiles, sorts, feeds in O(n) |
+| [SmokeHouse](https://github.com/RicheyWorks/SmokeHouse) | the log-structured store — durability, tail, watchers, replicas |
+| [Carver](https://github.com/RicheyWorks/Carver) | the read planner — decides how to read |
+| [Renderer](https://github.com/RicheyWorks/Renderer) | the materialized-view engine — folds the tail into live aggregates |
+| [Brine](https://github.com/RicheyWorks/Brine) | the adaptive cache — eviction policy evolved per workload |
+| [PitBoss](https://github.com/RicheyWorks/PitBoss) | the fleet conductor — lag watch, re-bootstrap, the promotion runbook |
+| **DryAge** (this repo) | the time-travel engine — as-of reads over preserved history |
+| [Twine](https://github.com/RicheyWorks/Twine) | crash-atomic multi-key batches — journaled commit, idempotent replay |
+| [SmokeSignal](https://github.com/RicheyWorks/SmokeSignal) | the wire — a loopback protocol face for the store |
+| [Jerky](https://github.com/RicheyWorks/Jerky) | cold storage — compressed, CRC-verified backup archives |
 
 ## Build
 
