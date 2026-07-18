@@ -55,6 +55,7 @@ composite builds:
 | [Twine](https://github.com/RicheyWorks/Twine) | crash-atomic multi-key batches — journaled commit, idempotent replay |
 | [SmokeSignal](https://github.com/RicheyWorks/SmokeSignal) | the wire — a loopback protocol face for the store |
 | [Jerky](https://github.com/RicheyWorks/Jerky) | cold storage — compressed, CRC-verified backup archives |
+| [WholeHog](https://github.com/RicheyWorks/WholeHog) | the integration organism — all of them, at once |
 
 ## Build
 
