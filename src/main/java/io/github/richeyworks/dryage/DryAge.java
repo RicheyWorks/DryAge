@@ -159,6 +159,32 @@ public final class DryAge<K, V> {
         }
     }
 
+    /**
+     * The aging policy, as one call (2026-08-19): keep the newest {@code count} generations
+     * and release everything older. Returns the released generations, ascending — an audit
+     * line for the caller's log, because dropping history deserves a record. {@code count}
+     * of zero empties the vault; a count at or above the vault's size releases nothing.
+     * Caller-cadenced like every policy in the ring — the vault never ages on its own clock,
+     * because it has none.
+     *
+     * @throws IllegalArgumentException if {@code count} is negative
+     */
+    public synchronized List<Long> retainNewest(int count) throws IOException {
+        if (count < 0) {
+            throw new IllegalArgumentException("count must be >= 0: " + count);
+        }
+        List<Long> timeline = generations();
+        int drop = timeline.size() - count;
+        if (drop <= 0) {
+            return List.of();
+        }
+        List<Long> released = new ArrayList<>(timeline.subList(0, drop));
+        for (long generation : released) {
+            release(generation);
+        }
+        return List.copyOf(released);
+    }
+
     private static void deleteRecursively(Path dir) throws IOException {
         if (!Files.exists(dir)) {
             return;

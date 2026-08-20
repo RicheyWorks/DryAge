@@ -36,6 +36,11 @@ named next seam.
   statistics, even Carver over it. Reading history costs nothing in new machinery.
 - **Named next seam:** record-granularity as-of needs a bounded-recovery stop condition
   upstream — to be cut with a consumer and evidence, not simulated here with a hack.
+  Measured 2026-08-20: the workaround ("just preserve more often") is priced and dead as a
+  substitute — checkpointing every 2k ops costs **191% of the churn's own time** (~1.4 MB
+  per checkpoint; each backup is a full prefix copy), against a 25% viability bar
+  ([`WholeHog/docs/EXPERIMENT-2026-08-20-cold-triggers.md`](https://github.com/RicheyWorks/WholeHog/blob/main/docs/EXPERIMENT-2026-08-20-cold-triggers.md)).
+  The seam stays held on its consumer trigger, now knowing what the fallback costs.
 
 ## The ecosystem
 

@@ -97,6 +97,41 @@ class DryAgeTest {
     }
 
     @Test
+    void retainNewestAgesOutTheOldAndReportsIt(@TempDir Path storeDir, @TempDir Path vaultDir)
+            throws IOException {
+        try (SmokeHouse<Long, String> store = SmokeHouse.open(storeDir, opts())) {
+            DryAge<Long, String> vault = DryAge.vault(vaultDir, opts());
+            long g1 = preserveAfterPut(vault, store, 1L, "one");
+            long g2 = preserveAfterPut(vault, store, 2L, "two");
+            long g3 = preserveAfterPut(vault, store, 3L, "three");
+            long g4 = preserveAfterPut(vault, store, 4L, "four");
+
+            // Keep more than exist: nothing released.
+            assertEquals(List.of(), vault.retainNewest(9), "nothing to age out yet");
+
+            // Keep 2: the two OLDEST go, ascending, on the record.
+            assertEquals(List.of(g1, g2), vault.retainNewest(2), "the released, for the log");
+            assertEquals(List.of(g3, g4), vault.generations(), "the newest two remain");
+            assertThrows(IllegalArgumentException.class, () -> vault.asOf(g1),
+                    "released history is really gone");
+            try (DryAge.AgedView<Long, String> v = vault.asOf(g4)) {
+                assertEquals(4, v.store().size(), "the survivors still read true");
+            }
+
+            // Zero empties the vault; negative is a caller defect.
+            assertEquals(List.of(g3, g4), vault.retainNewest(0));
+            assertTrue(vault.generations().isEmpty());
+            assertThrows(IllegalArgumentException.class, () -> vault.retainNewest(-1));
+        }
+    }
+
+    private static long preserveAfterPut(DryAge<Long, String> vault, SmokeHouse<Long, String> s,
+                                         long key, String value) throws IOException {
+        s.put(key, value);
+        return vault.preserve(s);
+    }
+
+    @Test
     void generationPathHandsOutThePreservedBytesReadOnly(@TempDir Path storeDir,
                                                          @TempDir Path vaultDir)
             throws IOException {
