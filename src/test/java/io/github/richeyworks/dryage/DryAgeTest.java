@@ -132,6 +132,39 @@ class DryAgeTest {
     }
 
     @Test
+    void aScanCarryingGenerationHoldsItsRunFromBirth(@TempDir Path storeDir,
+                                                     @TempDir Path vaultDir) throws IOException {
+        try (SmokeHouse<Long, String> store = SmokeHouse.open(storeDir, opts())) {
+            DryAge<Long, String> vault = DryAge.vault(vaultDir, opts());
+            store.put(1L, "one");
+            store.put(2L, "two");
+            store.put(3L, "three");
+            store.delete(2L);
+            long g = vault.preserve(store, true);              // carry the sorted run
+
+            // The run is inside the generation, and reads back as the live set in key order.
+            Path run = vault.generationPath(g).resolve(DryAge.SCAN_RUN);
+            assertTrue(java.nio.file.Files.isRegularFile(run), "the generation holds its run");
+            TreeMap<Long, String> scanned = new TreeMap<>();
+            assertEquals(2, SmokeHouse.scanSorted(run, opts(), scanned::put));
+            assertEquals(new TreeMap<>(java.util.Map.of(1L, "one", 3L, "three")), scanned);
+
+            // Recovery is indifferent to the sidecar: asOf still answers identically.
+            try (DryAge.AgedView<Long, String> view = vault.asOf(g)) {
+                assertEquals(2, view.store().size(), "the sidecar is invisible to recovery");
+                assertEquals("one", view.store().get(1L));
+            }
+
+            // A plain preserve carries no run — the cost is opt-in.
+            store.put(4L, "four");
+            long plain = vault.preserve(store);
+            assertTrue(!java.nio.file.Files.exists(
+                            vault.generationPath(plain).resolve(DryAge.SCAN_RUN)),
+                    "no sidecar unless asked");
+        }
+    }
+
+    @Test
     void generationPathHandsOutThePreservedBytesReadOnly(@TempDir Path storeDir,
                                                          @TempDir Path vaultDir)
             throws IOException {

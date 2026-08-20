@@ -78,9 +78,37 @@ public final class DryAge<K, V> {
      * under the store lock — segments + manifest, CRC'd). Returns the generation number.
      */
     public synchronized long preserve(SmokeHouse<K, V> store) throws IOException {
+        return preserve(store, false);
+    }
+
+    /** The name of the sorted-run sidecar a scan-carrying generation holds. */
+    public static final String SCAN_RUN = "scan.run";
+
+    /**
+     * Preserve, optionally carrying the sorted-run sidecar (ADR scan-sidecar, 2026-08-20):
+     * with {@code withScanRun}, the store's {@code exportSorted} run is written into the
+     * staging directory <b>before</b> the atomic move, so the generation holds its scan run
+     * from birth — the vault's founding rule (history's bytes never change) is never bent by
+     * a post-hoc write. Recovery is indifferent to the extra file (segments are
+     * pattern-matched), so {@link #asOf} behaves identically either way; archival consumers
+     * reach the run through {@link #generationPath} — or, once cured, through
+     * {@code Jerky.extract(archive, DryAge.SCAN_RUN)}, which is the whole point: history,
+     * scanned without resurrection. Opt-in because the export costs one ordered walk and the
+     * run's bytes ride in the vault; a vault used only for time travel pays nothing.
+     *
+     * <p><b>Honest bound:</b> backup and export each hold the store's lock, but not across the
+     * pair — a writer landing between them puts records in the run that the generation's
+     * segments don't hold. Preserve from a quiesced writer (the ecosystem's single-writer
+     * discipline makes this natural) when the run must equal the generation exactly.</p>
+     */
+    public synchronized long preserve(SmokeHouse<K, V> store, boolean withScanRun)
+            throws IOException {
         Objects.requireNonNull(store, "store");
         Path staging = Files.createTempDirectory(vaultDir, "staging-");
         long generation = store.backup(staging);
+        if (withScanRun) {
+            store.exportSorted(staging.resolve(SCAN_RUN));
+        }
         Path home = vaultDir.resolve(GEN_PREFIX + generation);
         if (Files.exists(home)) {
             deleteRecursively(staging);
