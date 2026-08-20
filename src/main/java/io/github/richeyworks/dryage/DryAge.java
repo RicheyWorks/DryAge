@@ -126,6 +126,31 @@ public final class DryAge<K, V> {
         return new AgedView<>(SmokeHouse.restore(scratch, opts), scratch);
     }
 
+    /**
+     * The preserved generation's directory, for <b>read-only</b> consumers (2026-08-19,
+     * named by WholeHog): an archiver that only reads — {@code Jerky.cure} is the canonical
+     * one — can take the preserved bytes directly, with no scratch copy, no recovery pass,
+     * and no re-backup. The old route (open an {@link #asOf} view, back up the view's store,
+     * cure the re-backup) copied history twice and recovered it once just to read bytes that
+     * were already CRC'd at capture; integration showed the dance was pure ceremony.
+     *
+     * <p><b>The contract is the vault's founding rule:</b> history's bytes never change. The
+     * returned path is handed out for reading; a consumer that writes into it is corrupting
+     * the vault, and no code path in this class will save it. To read the generation <em>as a
+     * store</em> (queries, order statistics), use {@link #asOf} — that is what the scratch
+     * copy is for.</p>
+     *
+     * @throws IllegalArgumentException if the generation was never preserved
+     */
+    public synchronized Path generationPath(long generation) throws IOException {
+        Path home = vaultDir.resolve(GEN_PREFIX + generation);
+        if (!Files.isDirectory(home)) {
+            throw new IllegalArgumentException("no generation " + generation
+                    + " in the vault; preserved: " + generations());
+        }
+        return home;
+    }
+
     /** Drop a generation from the vault — aging out old history is the caller's policy. */
     public synchronized void release(long generation) throws IOException {
         Path home = vaultDir.resolve(GEN_PREFIX + generation);

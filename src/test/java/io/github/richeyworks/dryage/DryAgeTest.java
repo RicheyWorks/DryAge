@@ -97,6 +97,33 @@ class DryAgeTest {
     }
 
     @Test
+    void generationPathHandsOutThePreservedBytesReadOnly(@TempDir Path storeDir,
+                                                         @TempDir Path vaultDir)
+            throws IOException {
+        try (SmokeHouse<Long, String> store = SmokeHouse.open(storeDir, opts())) {
+            DryAge<Long, String> vault = DryAge.vault(vaultDir, opts());
+            store.put(1L, "one");
+            store.put(2L, "two");
+            long g = vault.preserve(store);
+
+            // The path is the preserved generation's own directory, populated with the backup.
+            Path home = vault.generationPath(g);
+            assertTrue(java.nio.file.Files.isDirectory(home), "the generation home exists");
+            try (var listing = java.nio.file.Files.list(home)) {
+                assertTrue(listing.findAny().isPresent(), "and holds the preserved bytes");
+            }
+
+            // Reading through it never disturbs the vault: asOf still answers identically.
+            try (DryAge.AgedView<Long, String> view = vault.asOf(g)) {
+                assertEquals(2, view.store().size(), "the vault is undisturbed by the path read");
+            }
+
+            // Unknown generations fail loudly, exactly like asOf.
+            assertThrows(IllegalArgumentException.class, () -> vault.generationPath(g + 999));
+        }
+    }
+
+    @Test
     void unknownGenerationsAndReleaseFailAndWorkLoudly(@TempDir Path storeDir,
                                                        @TempDir Path vaultDir)
             throws IOException {
