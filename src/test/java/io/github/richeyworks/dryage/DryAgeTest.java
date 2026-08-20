@@ -97,6 +97,29 @@ class DryAgeTest {
     }
 
     @Test
+    void aFailedPreserveLeavesTheVaultExactlyAsItFoundIt(@TempDir Path storeDir,
+                                                         @TempDir Path vaultDir)
+            throws IOException {
+        // Ninth-pass finding 1: a failed backup used to leak its staging directory inside the
+        // vault, forever. Force the failure honestly: preserve from a CLOSED store.
+        DryAge<Long, String> vault = DryAge.vault(vaultDir, opts());
+        SmokeHouse<Long, String> store = SmokeHouse.open(storeDir, opts());
+        store.put(1L, "one");
+        long good = vault.preserve(store);                     // one real generation first
+        store.close();
+
+        assertThrows(Exception.class, () -> vault.preserve(store, true),
+                "preserving from a closed store must fail loudly");
+
+        try (var listing = java.nio.file.Files.list(vaultDir)) {
+            List<String> leftovers = listing.map(p -> p.getFileName().toString())
+                    .filter(n -> n.startsWith("staging-")).toList();
+            assertTrue(leftovers.isEmpty(), "no staging leak: " + leftovers);
+        }
+        assertEquals(List.of(good), vault.generations(), "the vault is exactly as it was");
+    }
+
+    @Test
     void retainNewestAgesOutTheOldAndReportsIt(@TempDir Path storeDir, @TempDir Path vaultDir)
             throws IOException {
         try (SmokeHouse<Long, String> store = SmokeHouse.open(storeDir, opts())) {

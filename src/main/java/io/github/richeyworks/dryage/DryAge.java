@@ -105,17 +105,24 @@ public final class DryAge<K, V> {
             throws IOException {
         Objects.requireNonNull(store, "store");
         Path staging = Files.createTempDirectory(vaultDir, "staging-");
-        long generation = store.backup(staging);
-        if (withScanRun) {
-            store.exportSorted(staging.resolve(SCAN_RUN));
-        }
-        Path home = vaultDir.resolve(GEN_PREFIX + generation);
-        if (Files.exists(home)) {
+        try {
+            long generation = store.backup(staging);
+            if (withScanRun) {
+                store.exportSorted(staging.resolve(SCAN_RUN));
+            }
+            Path home = vaultDir.resolve(GEN_PREFIX + generation);
+            if (Files.exists(home)) {
+                throw new IOException("generation " + generation + " already preserved");
+            }
+            Files.move(staging, home, StandardCopyOption.ATOMIC_MOVE);
+            return generation;
+        } catch (IOException | RuntimeException failed) {
+            // Ninth-pass finding 1 (2026-08-20): a failed backup or export used to LEAK its
+            // staging directory inside the vault, forever. A failed preserve now leaves the
+            // vault exactly as it found it.
             deleteRecursively(staging);
-            throw new IOException("generation " + generation + " already preserved");
+            throw failed;
         }
-        Files.move(staging, home, StandardCopyOption.ATOMIC_MOVE);
-        return generation;
     }
 
     /** Every preserved generation, ascending — the vault's timeline. */
