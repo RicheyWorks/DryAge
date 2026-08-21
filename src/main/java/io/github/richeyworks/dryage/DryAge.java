@@ -49,12 +49,24 @@ public final class DryAge<K, V> {
 
         @Override
         public void close() throws IOException {
-            store.close();
-            deleteRecursively(scratch);
+            // Tenth-pass D1: the scratch copy must be reclaimed even if the store's own close
+            // throws — otherwise a failing close leaks a full generation copy on every cycle.
+            try {
+                store.close();
+            } finally {
+                deleteRecursively(scratch);
+            }
         }
     }
 
     private static final String GEN_PREFIX = "gen-";
+
+    // Tenth-pass D3: a generation being released is first renamed OUT of the gen- namespace to a
+    // tombstone, atomically. The rename is the commit point — once it lands, the generation is
+    // gone from the timeline (generations()/asOf never see a .releasing- name) even if the
+    // byte-level delete that follows is interrupted. A leftover tombstone is a harmless orphan,
+    // swept on the next vault() open, never a half-deleted gen- a reader could restore truncated.
+    private static final String RELEASING_PREFIX = ".releasing-";
 
     private final Path vaultDir;
     private final SmokeHouseOptions<K, V> opts;
@@ -64,13 +76,58 @@ public final class DryAge<K, V> {
         this.opts = opts;
     }
 
-    /** Open (or create) a vault at {@code vaultDir}. */
+    /** Open (or create) a vault at {@code vaultDir}, sweeping any tombstone a prior release left. */
     public static <K, V> DryAge<K, V> vault(Path vaultDir, SmokeHouseOptions<K, V> opts)
             throws IOException {
         Objects.requireNonNull(vaultDir, "vaultDir");
         Objects.requireNonNull(opts, "opts");
         Files.createDirectories(vaultDir);
-        return new DryAge<>(vaultDir, opts);
+        DryAge<K, V> vault = new DryAge<>(vaultDir, opts);
+        vault.sweepReleasing();
+        return vault;
+    }
+
+    /** Best-effort removal of tombstones a prior process's release renamed but did not finish
+     *  deleting. They are already out of the timeline; this only reclaims their bytes. */
+    private synchronized void sweepReleasing() throws IOException {
+        try (var listing = Files.list(vaultDir)) {
+            for (Path p : listing.toList()) {
+                if (p.getFileName().toString().startsWith(RELEASING_PREFIX)) {
+                    try {
+                        deleteRecursively(p);
+                    } catch (IOException stillCannot) {
+                        // Leave it — an orphan tombstone is invisible to the timeline; the next
+                        // open tries again. Never fail vault() over reclaimable bytes.
+                    }
+                }
+            }
+        }
+    }
+
+    /** Raised by {@link #retainNewest} when some generations could not be released. Carries the
+     *  full audit: which generations were released (gone from the timeline) and which survived
+     *  the attempt untouched — so the caller's log is never lost to a partial failure. */
+    public static final class RetentionException extends IOException {
+        private static final long serialVersionUID = 1L;
+        private final List<Long> released;
+        private final List<Long> failed;
+
+        RetentionException(List<Long> released, List<Long> failed) {
+            super("retention partially failed: released " + released + ", could not release "
+                    + failed + " (those generations remain whole and readable)");
+            this.released = List.copyOf(released);
+            this.failed = List.copyOf(failed);
+        }
+
+        /** Generations actually dropped from the timeline, ascending — the audit line survives. */
+        public List<Long> released() {
+            return released;
+        }
+
+        /** Generations that could not be released; each is still whole and restorable. */
+        public List<Long> failed() {
+            return failed;
+        }
     }
 
     /**
@@ -106,14 +163,21 @@ public final class DryAge<K, V> {
         Objects.requireNonNull(store, "store");
         Path staging = Files.createTempDirectory(vaultDir, "staging-");
         try {
-            long generation = store.backup(staging);
+            store.backup(staging);                             // the backup's own number rides in
+                                                               // its manifest; the vault labels the
+                                                               // generation itself (D4).
             if (withScanRun) {
                 store.exportSorted(staging.resolve(SCAN_RUN));
             }
+            // Tenth-pass D4: preserve used to name the generation by the store-issued backup
+            // number. A store rollback (restore from an older backup) re-issues numbers, so the
+            // next preserve collided with an existing generation ("already preserved") and
+            // bricked the vault; worse, retainNewest ordered by that number, so after a rollback
+            // it could release the actually-newest data. The vault now issues its own strictly
+            // monotonic number — max existing + 1 — so generations are collision-free and their
+            // order is preservation order, which is what retention must age by.
+            long generation = nextGeneration();
             Path home = vaultDir.resolve(GEN_PREFIX + generation);
-            if (Files.exists(home)) {
-                throw new IOException("generation " + generation + " already preserved");
-            }
             Files.move(staging, home, StandardCopyOption.ATOMIC_MOVE);
             return generation;
         } catch (IOException | RuntimeException failed) {
@@ -123,6 +187,14 @@ public final class DryAge<K, V> {
             deleteRecursively(staging);
             throw failed;
         }
+    }
+
+    /** The vault's next generation label: one past the highest it holds (D4) — strictly
+     *  monotonic in preservation order, so it never collides with a rolled-back store's
+     *  re-issued backup number, and retention by number ages by preservation order. */
+    private long nextGeneration() throws IOException {
+        List<Long> timeline = generations();
+        return timeline.isEmpty() ? 0L : timeline.get(timeline.size() - 1) + 1L;
     }
 
     /** Every preserved generation, ascending — the vault's timeline. */
@@ -152,13 +224,20 @@ public final class DryAge<K, V> {
                     + " in the vault; preserved: " + generations());
         }
         Path scratch = Files.createTempDirectory("dryage-view");
-        try (var listing = Files.list(home)) {
-            for (Path f : listing.toList()) {
-                Files.copy(f, scratch.resolve(f.getFileName().toString()),
-                        StandardCopyOption.COPY_ATTRIBUTES);
+        try {
+            try (var listing = Files.list(home)) {
+                for (Path f : listing.toList()) {
+                    Files.copy(f, scratch.resolve(f.getFileName().toString()),
+                            StandardCopyOption.COPY_ATTRIBUTES);
+                }
             }
+            return new AgedView<>(SmokeHouse.restore(scratch, opts), scratch);
+        } catch (IOException | RuntimeException failed) {
+            // Tenth-pass D2: a failed copy or restore must not orphan the scratch dir —
+            // mirror preserve's ninth-pass cleanup.
+            deleteRecursively(scratch);
+            throw failed;
         }
-        return new AgedView<>(SmokeHouse.restore(scratch, opts), scratch);
     }
 
     /**
@@ -186,11 +265,35 @@ public final class DryAge<K, V> {
         return home;
     }
 
-    /** Drop a generation from the vault — aging out old history is the caller's policy. */
+    /**
+     * Drop a generation from the vault — aging out old history is the caller's policy. Atomic
+     * at the timeline level (D3): the generation is renamed out of the {@code gen-} namespace
+     * before its bytes are deleted, so an interruption can leave orphan bytes but never a
+     * half-deleted generation that {@link #generations} lists or {@link #asOf} restores
+     * truncated. A generation that isn't present is a no-op.
+     */
     public synchronized void release(long generation) throws IOException {
+        dropGeneration(generation);
+    }
+
+    /**
+     * The atomic drop: rename {@code gen-N} to a tombstone (the commit point — after it the
+     * generation is gone from the timeline), then best-effort delete the tombstone's bytes.
+     * Throws only when the rename itself fails, i.e. the generation is still fully live; a
+     * failure after the rename is swallowed because the timeline is already consistent.
+     */
+    private void dropGeneration(long generation) throws IOException {
         Path home = vaultDir.resolve(GEN_PREFIX + generation);
-        if (Files.isDirectory(home)) {
-            deleteRecursively(home);
+        if (!Files.isDirectory(home)) {
+            return;                                            // already gone — idempotent
+        }
+        Path tombstone = vaultDir.resolve(RELEASING_PREFIX + generation);
+        Files.move(home, tombstone, StandardCopyOption.ATOMIC_MOVE);   // commit point
+        try {
+            deleteRecursively(tombstone);
+        } catch (IOException bytesLinger) {
+            // The generation is already out of the timeline; the leftover tombstone is an orphan
+            // the next vault() open sweeps. Reclaiming bytes must not fail a completed release.
         }
     }
 
@@ -202,7 +305,15 @@ public final class DryAge<K, V> {
      * Caller-cadenced like every policy in the ring — the vault never ages on its own clock,
      * because it has none.
      *
+     * <p>Robust to a partial failure (D3): each doomed generation is dropped atomically, and one
+     * that cannot be released does not abort the rest — the newer doomed generations still age
+     * out, and the caller learns exactly what happened. If every drop succeeds, the released
+     * list is returned as an audit line. If any drop fails, a {@link RetentionException} carries
+     * both the released and the still-live generations, so the audit is never lost and no
+     * generation is left half-deleted.</p>
+     *
      * @throws IllegalArgumentException if {@code count} is negative
+     * @throws RetentionException if some (not all) doomed generations could not be released
      */
     public synchronized List<Long> retainNewest(int count) throws IOException {
         if (count < 0) {
@@ -213,9 +324,19 @@ public final class DryAge<K, V> {
         if (drop <= 0) {
             return List.of();
         }
-        List<Long> released = new ArrayList<>(timeline.subList(0, drop));
-        for (long generation : released) {
-            release(generation);
+        List<Long> doomed = timeline.subList(0, drop);
+        List<Long> released = new ArrayList<>();
+        List<Long> failed = new ArrayList<>();
+        for (long generation : doomed) {
+            try {
+                dropGeneration(generation);
+                released.add(generation);
+            } catch (IOException couldNotRelease) {
+                failed.add(generation);                        // still whole; press on with the rest
+            }
+        }
+        if (!failed.isEmpty()) {
+            throw new RetentionException(released, failed);
         }
         return List.copyOf(released);
     }
