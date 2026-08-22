@@ -25,10 +25,19 @@ import java.util.Objects;
  * <h2>Honest bounds, stated loudly</h2>
  * Time travel reaches exactly as far as the vault: a generation you never preserved is a
  * past you cannot revisit, and compaction/retention on the live store never affects the
- * vault (backups are prefix copies, CRC'd at capture). Coordinates are generations, not
- * timestamps — v1's granularity is "when you called preserve". Record-granularity as-of
- * (a bounded-recovery stop condition on {@code SmokeHouse.open}) is the named next seam,
- * to be cut upstream when a consumer shows the generation granularity isn't enough.
+ * vault (backups are prefix copies, CRC'd at capture). Coordinates are generations, and
+ * <em>within</em> a generation, records: {@link #asOf(long)} opens a generation whole, and
+ * {@link #asOf(long, long)} opens it as of the first N mutations in its log's write order —
+ * the finer coordinate the generation granularity could not reach (2026-08-22, the named
+ * seam, cut on {@link io.github.richeyworks.smokehouse.SmokeHouse#openAsOfRecord}).
+ * {@link #recordCount(long)} reports a generation's record count so a caller can choose a bound.
+ *
+ * <p><b>The record coordinate is honest only for an uncompacted generation.</b> A generation's
+ * segments are the live log's bytes at preserve time (backup copies prefixes, never compacts),
+ * so record-granularity replays a generation preserved before any compaction mutation by
+ * mutation. If the live store had already compacted, overwrites and tombstones were reclaimed
+ * before capture, and "record N" counts the surviving records, not the original history — the
+ * generation is still whole and readable, just no longer replayable step by step.</p>
  */
 public final class DryAge<K, V> {
 
@@ -218,6 +227,50 @@ public final class DryAge<K, V> {
      * touched), deleted when the view closes.
      */
     public synchronized AgedView<K, V> asOf(long generation) throws IOException {
+        return openView(generation, -1L);
+    }
+
+    /**
+     * Open generation {@code generation} as of the first {@code upToRecords} mutations in its
+     * log's write order — record-granularity time travel within a generation (2026-08-22). The
+     * returned view is the state after exactly those mutations and nothing later; {@code 0} is the
+     * empty store, and a bound at or above {@link #recordCount(long)} equals {@link #asOf(long)}.
+     * Like every view it runs on a scratch copy the vault never sees, deleted on close.
+     *
+     * <p>Honest only for an uncompacted generation — see the class notes. The coordinate is a
+     * record count, not a timestamp: pair it with {@link #recordCount(long)} to walk a generation's
+     * history, or with a known write count from the moment you preserved.</p>
+     *
+     * @throws IllegalArgumentException if the generation was never preserved, or {@code upToRecords}
+     *                                  is negative
+     */
+    public synchronized AgedView<K, V> asOf(long generation, long upToRecords) throws IOException {
+        if (upToRecords < 0) {
+            throw new IllegalArgumentException("upToRecords must be >= 0: " + upToRecords);
+        }
+        return openView(generation, upToRecords);
+    }
+
+    /**
+     * How many intact records generation {@code generation} holds — the exclusive upper bound for
+     * {@link #asOf(long, long)}'s record coordinate. Read directly off the preserved bytes, so it
+     * never disturbs the vault (no scratch copy, no recovery).
+     *
+     * @throws IllegalArgumentException if the generation was never preserved
+     */
+    public synchronized long recordCount(long generation) throws IOException {
+        Path home = vaultDir.resolve(GEN_PREFIX + generation);
+        if (!Files.isDirectory(home)) {
+            throw new IllegalArgumentException("no generation " + generation
+                    + " in the vault; preserved: " + generations());
+        }
+        return SmokeHouse.countRecords(home);
+    }
+
+    /** The shared view path: copy the generation to a scratch dir (the vault stays pristine), then
+     *  recover it whole ({@code applyLimit < 0}) or as of a record prefix ({@code applyLimit >= 0}).
+     *  A failed copy or restore reclaims the scratch (tenth-pass D2) rather than orphaning it. */
+    private AgedView<K, V> openView(long generation, long applyLimit) throws IOException {
         Path home = vaultDir.resolve(GEN_PREFIX + generation);
         if (!Files.isDirectory(home)) {
             throw new IllegalArgumentException("no generation " + generation
@@ -231,10 +284,11 @@ public final class DryAge<K, V> {
                             StandardCopyOption.COPY_ATTRIBUTES);
                 }
             }
-            return new AgedView<>(SmokeHouse.restore(scratch, opts), scratch);
+            SmokeHouse<K, V> store = applyLimit < 0
+                    ? SmokeHouse.restore(scratch, opts)
+                    : SmokeHouse.openAsOfRecord(scratch, opts, applyLimit);
+            return new AgedView<>(store, scratch);
         } catch (IOException | RuntimeException failed) {
-            // Tenth-pass D2: a failed copy or restore must not orphan the scratch dir —
-            // mirror preserve's ninth-pass cleanup.
             deleteRecursively(scratch);
             throw failed;
         }

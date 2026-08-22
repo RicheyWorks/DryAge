@@ -285,6 +285,69 @@ class DryAgeTest {
     }
 
     @Test
+    void recordGranularityReconstructsAMomentNoGenerationCaptured(@TempDir Path storeDir,
+                                                                  @TempDir Path vaultDir)
+            throws IOException {
+        // The consumer that shows generation granularity isn't enough: a caller preserves ONCE,
+        // after a whole run of mutations, and later needs an INTERMEDIATE state that no preserve
+        // ever captured. Generations can only answer "the moment you called preserve" — the final
+        // state. Record-granularity as-of replays the generation's own log, mutation by mutation,
+        // to any point in its history. This is the named seam being cut, with a real need in hand.
+        try (SmokeHouse<Long, String> store = SmokeHouse.open(storeDir, opts())) {
+            DryAge<Long, String> vault = DryAge.vault(vaultDir, opts());
+
+            store.put(1L, "one");                              // record 1
+            store.put(2L, "two");                              // record 2
+            store.put(3L, "three");                            // record 3
+            store.delete(2L);                                  // record 4
+            store.put(1L, "ONE");                              // record 5 (overwrite)
+            long g = vault.preserve(store);                    // the ONLY generation
+
+            TreeMap<Long, String> whole = new TreeMap<>(java.util.Map.of(1L, "ONE", 3L, "three"));
+            assertEquals(5L, vault.recordCount(g), "the generation holds every mutation's record");
+
+            // Whole, and the bound at/above the count, both equal the final state.
+            try (DryAge.AgedView<Long, String> v = vault.asOf(g);
+                 DryAge.AgedView<Long, String> full = vault.asOf(g, 5);
+                 DryAge.AgedView<Long, String> over = vault.asOf(g, 100)) {
+                assertEquals(whole, scan(v.store()), "asOf whole = the preserved moment");
+                assertEquals(whole, scan(full.store()), "the exact record count = the whole");
+                assertEquals(whole, scan(over.store()), "a bound past the end clamps to the whole");
+            }
+
+            // The moments only record-granularity can reach — none of these was ever preserved.
+            try (DryAge.AgedView<Long, String> r0 = vault.asOf(g, 0);
+                 DryAge.AgedView<Long, String> r2 = vault.asOf(g, 2);
+                 DryAge.AgedView<Long, String> r3 = vault.asOf(g, 3);
+                 DryAge.AgedView<Long, String> r4 = vault.asOf(g, 4)) {
+                assertEquals(0, r0.store().size(), "record 0 is the empty store");
+                assertEquals(new TreeMap<>(java.util.Map.of(1L, "one", 2L, "two")),
+                        scan(r2.store()), "after the first two puts");
+                TreeMap<Long, String> afterThree =
+                        new TreeMap<>(java.util.Map.of(1L, "one", 2L, "two", 3L, "three"));
+                assertEquals(afterThree, scan(r3.store()), "the moment before the delete");
+                assertEquals(new TreeMap<>(java.util.Map.of(1L, "one", 3L, "three")),
+                        scan(r4.store()), "after the delete, before the overwrite");
+
+                // The proof the generation could not have captured this: the record-3 state
+                // (key 2 still live, key 1 still "one") differs from the only preserved state.
+                assertTrue(!afterThree.equals(whole),
+                        "a mid-generation moment no single preserve ever held");
+
+                // Order statistics are fully built over the bounded prefix, not just membership.
+                assertEquals(1L, r3.store().firstKey());
+                assertEquals(3L, r3.store().lastKey());
+                assertEquals(2L, r3.store().nthKey(2), "the 2nd-smallest live key of the prefix");
+            }
+
+            assertThrows(IllegalArgumentException.class, () -> vault.asOf(g, -1),
+                    "a negative record coordinate is a caller defect");
+            assertThrows(IllegalArgumentException.class, () -> vault.recordCount(g + 999),
+                    "an unknown generation has no record count");
+        }
+    }
+
+    @Test
     void generationPathHandsOutThePreservedBytesReadOnly(@TempDir Path storeDir,
                                                          @TempDir Path vaultDir)
             throws IOException {
